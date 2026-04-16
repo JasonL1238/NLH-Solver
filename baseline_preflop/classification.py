@@ -105,7 +105,7 @@ _SUITED_CONNECTORS = {"T9s", "98s", "87s", "76s", "65s", "54s"}
 _SUITED_ONE_GAPPERS = {"J9s", "T8s", "97s", "86s", "75s", "64s", "53s"}
 
 _SUITED_TWO_GAPPERS_TRASH = {
-    "J8s", "T7s", "96s", "85s", "74s", "63s", "52s", "43s", "42s", "32s",
+    "T7s", "96s", "85s", "74s", "63s", "52s", "43s", "42s", "32s",
 }
 
 _OFFSUIT_CONNECTORS_SEMI = {

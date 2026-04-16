@@ -1,0 +1,59 @@
+---
+description: Always-on project constraints for the heads-up no-limit Hold'em engine
+alwaysApply: true
+---
+
+# Poker Engine Fundamentals
+
+## Scope and architecture
+- This project is a heads-up no-limit Texas Hold'em engine.
+- There are exactly 2 players: HERO and VILLAIN.
+- Preflop positions are exactly:
+  - `BTN_SB`: dealer/button + small blind, acts first preflop
+  - `BB`: big blind, acts second preflop
+- Design all state and action-history systems so they extend cleanly to flop, turn, and river.
+
+## Canonical source of truth
+- `action_history` is the canonical source of truth.
+- Pot size, player contributions, amount-to-call, current actor, and betting-round closure must be derived centrally from ordered action history plus blind/stack configuration.
+- Direct state fields such as `pot_size_bb`, `current_bet_to_call_bb`, `hero_contribution_bb`, `villain_contribution_bb`, `current_actor`, and `betting_round_closed` are non-canonical mirrors or caches only.
+- If direct fields are present, validate them against derived values.
+
+## Canonical immediate-hand policy by street
+- **Preflop:** `baseline_preflop` is the canonical decision layer; adaptive logic builds on it and must not bypass legality or chart-driven sizing intent when profile data is weak.
+- **Flop:** `flop_policy.recommend_flop_action_ev` (entry: `flop_equity.equity_integration.recommend_flop_action_with_equity`) is the canonical decision layer, constrained by `poker_core.legal_actions` (min/max bet and raise sizes for the current hand). Adaptive / exploit (`flop_adaptive`) nudges on top of that output; it must not invent illegal sizes or actions.
+
+## Raise-size sensitivity must be preserved
+- Preflop: baseline raise-size filtering remains mandatory as today.
+- Flop: every BET/RAISE token must come from `legal_actions` bounds for the actual line; EV evaluates a discrete grid inside those bounds. When adding adaptive logic, do not bypass or weaken respect for the current hand's legal min/max raise and bet sizes.
+- Long-term sizing tendencies are secondary signals only.
+- Current-hand raise size always has priority over generic profile-level sizing tendencies.
+
+## State and validation rules
+- Validate heads-up action order strictly.
+- Reject impossible action sequences.
+- Reject actions after betting is closed.
+- Legal action generation must be derived from the canonical state, not hardcoded separately.
+- Use one central state reconstruction/validation path.
+
+## Strategy development philosophy
+- Build the engine in layers: (1) preflop baseline + flop EV policy (within `legal_actions`), (2) opponent model, (3) exploit adjustment.
+- Do not jump directly to monolithic AI or solver-driven architecture for baseline phases.
+- Prefer explicit, deterministic, explainable rules over hidden heuristics.
+
+## Explainability
+- Every recommendation must include structured debug output showing: hand class, stack depth bucket (preflop), action context, raise size bucket if relevant, policy rule id (e.g. preflop chart id or flop `EV_ARGMAX`), legal actions, primary policy action, final action after adaptation (if any), whether adaptation changed the decision, and why.
+
+## Testing requirements
+- Tests are mandatory for state validation, legal action generation, and recommendation legality.
+- Tests must preserve architectural invariants.
+- If a new feature can violate a fundamental assumption, add tests that enforce the assumption.
+
+## Code style and implementation constraints
+- Keep code small, explicit, inspectable, and modular.
+- Prefer plain Python with standard library and `pytest` for baseline and early adaptive phases.
+- Avoid overengineering. Do not add unnecessary frameworks, APIs, or hidden state layers.
+
+## Non-negotiable rule
+- Never create competing sources of truth for poker state.
+- Never let adaptive logic override immediate-hand legality or size-sensitive constraints from `legal_actions` (preflop baseline sizing rules; flop EV grid within legal bounds).

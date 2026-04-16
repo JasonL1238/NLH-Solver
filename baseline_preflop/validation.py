@@ -202,7 +202,7 @@ def derive_preflop_state(
 
     derived = DerivedState(
         hero_is_first_to_act_preflop=hero_is_btn,
-        hero_is_in_position_postflop_future_flag=not hero_is_btn,
+        hero_is_in_position_postflop_future_flag=hero_is_btn,
         unopened_pot=unopened,
         facing_limp=facing_limp,
         facing_open_raise=facing_open_raise,
@@ -427,8 +427,10 @@ def _validate_action_sequence(state: PokerState) -> None:
 
         elif rec.action_type == ActionType.CALL:
             needed = bet_level - contribs[rec.player]
-            if needed < -1e-9:
-                raise ValidationError(f"Negative call amount at index {i}")
+            if needed < 1e-9:
+                raise ValidationError(
+                    f"Cannot call when there is nothing to call (index {i})"
+                )
             contribs[rec.player] = bet_level
 
         elif rec.action_type in (ActionType.RAISE, ActionType.BET):

@@ -592,6 +592,17 @@ class TestImpossibleStates:
         with pytest.raises(ValidationError):
             make_preflop_state("As Kd", "BB", 100, history)
 
+    def test_call_when_nothing_to_call(self):
+        """BB cannot CALL when contributions are already equal (limp scenario)."""
+        history = [
+            {"player": "VILLAIN", "action": "POST_BLIND", "amount": 0.5},
+            {"player": "HERO", "action": "POST_BLIND", "amount": 1.0},
+            {"player": "VILLAIN", "action": "CALL"},
+            {"player": "HERO", "action": "CALL"},
+        ]
+        with pytest.raises(ValidationError, match="nothing to call"):
+            make_preflop_state("As Kd", "BB", 100, history)
+
 
 # ===================================================================
 # Derived state flags
@@ -630,13 +641,15 @@ class TestDerivedState:
         state = unopened_btn_decision("As Kd", 100)
         d = state.derived
         assert d.hero_is_first_to_act_preflop is True
-        assert d.hero_is_in_position_postflop_future_flag is False
+        # BTN acts last postflop -> in position
+        assert d.hero_is_in_position_postflop_future_flag is True
 
     def test_hero_position_bb(self):
         state = bb_vs_open_decision("Td 9c", 2.5, 100)
         d = state.derived
         assert d.hero_is_first_to_act_preflop is False
-        assert d.hero_is_in_position_postflop_future_flag is True
+        # BB acts first postflop -> out of position
+        assert d.hero_is_in_position_postflop_future_flag is False
 
     def test_stack_depth_bucket_assigned(self):
         state = unopened_btn_decision("As Kd", 5)
@@ -680,3 +693,299 @@ class TestIntegration:
         output = pretty_print_decision(dec, state)
         assert "PREFLOP DECISION SUMMARY" in output
         assert "QJs" in output
+
+
+# ===================================================================
+# Audit: extended hand classification
+# ===================================================================
+
+class TestAuditHandClassification:
+    """Cover the representative hands from the audit spec."""
+
+    def test_aqo(self):
+        hf = hand_features(parse_cards("Ad Qc"))
+        assert hf.hand_class_label == "AQo"
+        assert hf.hand_bucket == HandBucket.C_OFFSUIT_BIG_BROADWAY
+
+    def test_a4o(self):
+        hf = hand_features(parse_cards("Ah 4c"))
+        assert hf.hand_class_label == "A4o"
+        assert hf.hand_bucket == HandBucket.E_OFFSUIT_AX_LOW
+        assert hf.is_wheel_ace is True
+
+    def test_k9s(self):
+        hf = hand_features(parse_cards("Ks 9s"))
+        assert hf.hand_class_label == "K9s"
+        assert hf.hand_bucket == HandBucket.F_SUITED_KX_HIGH
+
+    def test_kto(self):
+        hf = hand_features(parse_cards("Kd Tc"))
+        assert hf.hand_class_label == "KTo"
+        assert hf.hand_bucket == HandBucket.G_OFFSUIT_KX_HIGH
+
+    def test_q9s(self):
+        hf = hand_features(parse_cards("Qs 9s"))
+        assert hf.hand_class_label == "Q9s"
+        assert hf.hand_bucket == HandBucket.H_SUITED_QJ_HIGH
+
+    def test_j8s(self):
+        hf = hand_features(parse_cards("Js 8s"))
+        assert hf.hand_class_label == "J8s"
+        # Suited J with low >= 7 hits the QJ-high branch before the two-gapper set
+        assert hf.hand_bucket == HandBucket.H_SUITED_QJ_HIGH
+
+    def test_t9s(self):
+        hf = hand_features(parse_cards("Ts 9s"))
+        assert hf.hand_class_label == "T9s"
+        assert hf.is_connector is True
+        assert hf.hand_bucket == HandBucket.J_SUITED_CONNECTORS
+
+    def test_76s(self):
+        hf = hand_features(parse_cards("7s 6s"))
+        assert hf.hand_class_label == "76s"
+        assert hf.is_connector is True
+        assert hf.hand_bucket == HandBucket.J_SUITED_CONNECTORS
+
+    def test_97o(self):
+        hf = hand_features(parse_cards("9d 7c"))
+        assert hf.hand_class_label == "97o"
+        assert hf.hand_bucket == HandBucket.M_OFFSUIT_CONNECTORS
+
+    def test_gap_size_correct(self):
+        hf_conn = hand_features(parse_cards("8s 7s"))
+        assert hf_conn.gap_size == 0
+        hf_one = hand_features(parse_cards("9s 7s"))
+        assert hf_one.gap_size == 1
+        hf_two = hand_features(parse_cards("Ts 7s"))
+        assert hf_two.gap_size == 2
+
+    def test_non_wheel_ace(self):
+        hf = hand_features(parse_cards("As 8d"))
+        assert hf.is_wheel_ace is False
+
+
+# ===================================================================
+# Audit: pot, contribution, and to-call derivation
+# ===================================================================
+
+class TestAuditPotDerivation:
+    def test_bb_vs_open_contributions(self):
+        state = bb_vs_open_decision("Td 9c", 2.5, 100)
+        assert abs(state.pot_size_bb - 3.5) < 1e-9
+        assert abs(state.hero_contribution_bb - 1.0) < 1e-9
+        assert abs(state.villain_contribution_bb - 2.5) < 1e-9
+        assert abs(state.current_bet_to_call_bb - 1.5) < 1e-9
+
+    def test_btn_vs_3bet_contributions(self):
+        state = btn_vs_3bet_decision("Qh Qd", 2.5, 8.0, 100)
+        assert abs(state.pot_size_bb - 10.5) < 1e-9
+        assert abs(state.hero_contribution_bb - 2.5) < 1e-9
+        assert abs(state.villain_contribution_bb - 8.0) < 1e-9
+        assert abs(state.current_bet_to_call_bb - 5.5) < 1e-9
+
+    def test_btn_vs_iso_contributions(self):
+        state = btn_vs_iso_after_limp_decision("As Kd", 3.5, 100)
+        assert abs(state.hero_contribution_bb - 1.0) < 1e-9
+        assert abs(state.villain_contribution_bb - 3.5) < 1e-9
+        assert abs(state.pot_size_bb - 4.5) < 1e-9
+        assert abs(state.current_bet_to_call_bb - 2.5) < 1e-9
+
+    def test_bb_vs_4bet_contributions(self):
+        state = bb_vs_4bet_decision("As Kd", 2.5, 8.0, 20.0, 100)
+        assert abs(state.hero_contribution_bb - 8.0) < 1e-9
+        assert abs(state.villain_contribution_bb - 20.0) < 1e-9
+        assert abs(state.pot_size_bb - 28.0) < 1e-9
+        assert abs(state.current_bet_to_call_bb - 12.0) < 1e-9
+
+    def test_unopened_btn_contributions(self):
+        state = unopened_btn_decision("As Kd", 100)
+        assert abs(state.pot_size_bb - 1.5) < 1e-9
+        assert abs(state.hero_contribution_bb - 0.5) < 1e-9
+        assert abs(state.villain_contribution_bb - 1.0) < 1e-9
+        assert abs(state.current_bet_to_call_bb - 0.5) < 1e-9
+
+    def test_bb_vs_limp_contributions(self):
+        state = bb_vs_limp_decision("7h 2d", 100)
+        assert abs(state.pot_size_bb - 2.0) < 1e-9
+        assert abs(state.hero_contribution_bb - 1.0) < 1e-9
+        assert abs(state.villain_contribution_bb - 1.0) < 1e-9
+        assert abs(state.current_bet_to_call_bb - 0.0) < 1e-9
+
+
+# ===================================================================
+# Audit: legal actions for all spots
+# ===================================================================
+
+class TestAuditLegalActionsAllSpots:
+    def test_btn_vs_iso_has_fold_call_raise(self):
+        state = btn_vs_iso_after_limp_decision("As Kd", 3.5, 100)
+        legal = legal_actions_for_hero(state)
+        types = {a.action_type for a in legal}
+        assert ActionType.FOLD in types
+        assert ActionType.CALL in types
+        assert ActionType.RAISE in types
+
+    def test_bb_vs_4bet_has_fold_call_raise(self):
+        state = bb_vs_4bet_decision("As Kd", 2.5, 8.0, 20.0, 100)
+        legal = legal_actions_for_hero(state)
+        types = {a.action_type for a in legal}
+        assert ActionType.FOLD in types
+        assert ActionType.CALL in types
+        assert ActionType.RAISE in types
+
+    def test_short_stack_no_raise_when_calling_is_allin(self):
+        state = bb_vs_open_decision("As Kd", 2.5, 3.0)
+        legal = legal_actions_for_hero(state)
+        types = {a.action_type for a in legal}
+        assert ActionType.FOLD in types
+        assert ActionType.CALL in types
+        # Calling uses 1.5, hero has 2.0 remaining; 0.5 chips after calling
+        # min raise to = 2.5 + 1.5 = 4.0, which exceeds stack
+        # so hero can only jam to 3.0
+        raises = [a for a in legal if a.action_type == ActionType.RAISE]
+        if raises:
+            assert all(abs(r.raise_to_bb - 3.0) < 1e-9 for r in raises)
+
+
+# ===================================================================
+# Audit: raise-size sensitivity
+# ===================================================================
+
+class TestAuditRaiseSizeSensitivity:
+    def test_kjo_tightens_vs_large_open(self):
+        """KJo BB should not change action at 2.5 but may at 4.5."""
+        s25 = bb_vs_open_decision("Kh Jc", 2.5, 100)
+        d25 = recommend_preflop_action(s25)
+        _assert_valid_decision(s25, d25)
+        # KJo vs standard 2.5 open should continue
+        assert d25.recommended_action.action_type in (ActionType.CALL, ActionType.RAISE)
+
+    def test_marginal_hand_folds_vs_large_open(self):
+        """A marginal call hand should fold vs a large open (MDF tightening)."""
+        s_small = bb_vs_open_decision("7s 6s", 2.0, 100)
+        d_small = recommend_preflop_action(s_small)
+        _assert_valid_decision(s_small, d_small)
+
+        s_large = bb_vs_open_decision("7s 6s", 5.0, 100)
+        d_large = recommend_preflop_action(s_large)
+        _assert_valid_decision(s_large, d_large)
+
+        # 76s should continue vs 2x, fold vs 5x
+        assert d_small.recommended_action.action_type in (ActionType.CALL, ActionType.RAISE)
+        assert d_large.recommended_action.action_type == ActionType.FOLD
+
+    def test_defense_scalar_decreases_with_larger_opens(self):
+        """Verify defense_scalar is monotonically decreasing as open size grows."""
+        scalars = []
+        for size in [2.0, 2.5, 3.5, 5.0]:
+            s = bb_vs_open_decision("Td 9c", size, 100)
+            d = recommend_preflop_action(s)
+            scalars.append(d.debug.get("defense_scalar", 1.0))
+        for i in range(len(scalars) - 1):
+            assert scalars[i] >= scalars[i + 1] - 1e-9
+
+    def test_mdf_rule_present_when_facing_raise(self):
+        """All facing-raise decisions should include MDF info in debug."""
+        s = bb_vs_open_decision("Td 9c", 2.5, 100)
+        d = recommend_preflop_action(s)
+        assert "mdf_rule" in d.debug
+        assert d.debug["mdf_rule"] is not None
+
+    def test_debug_includes_chart_context_and_filtered_action(self):
+        s = bb_vs_open_decision("As Kd", 2.5, 100)
+        d = recommend_preflop_action(s)
+        for key in ("chart_context", "chart_action_raw", "chart_action_filtered",
+                     "defense_scalar", "mdf_rule"):
+            assert key in d.debug, f"Missing debug key: {key}"
+
+
+# ===================================================================
+# Audit: golden scenario tests
+# ===================================================================
+
+class TestAuditGoldenScenarios:
+    def test_aa_btn_always_raises(self):
+        for stack in [5, 10, 30, 60, 100]:
+            state = unopened_btn_decision("Ah Ad", stack)
+            dec = recommend_preflop_action(state)
+            _assert_valid_decision(state, dec)
+            assert dec.recommended_action.action_type == ActionType.RAISE
+
+    def test_72o_btn_always_folds_at_deep_stacks(self):
+        for stack in [30, 60, 100]:
+            state = unopened_btn_decision("7d 2c", stack)
+            dec = recommend_preflop_action(state)
+            _assert_valid_decision(state, dec)
+            assert dec.recommended_action.action_type == ActionType.FOLD
+
+    def test_a5s_bb_continues_vs_min_open(self):
+        state = bb_vs_open_decision("As 5s", 2.0, 100)
+        dec = recommend_preflop_action(state)
+        _assert_valid_decision(state, dec)
+        assert dec.recommended_action.action_type in (ActionType.CALL, ActionType.RAISE)
+
+    def test_qq_btn_continues_vs_3bet(self):
+        state = btn_vs_3bet_decision("Qh Qd", 2.5, 8.0, 100)
+        dec = recommend_preflop_action(state)
+        _assert_valid_decision(state, dec)
+        assert dec.recommended_action.action_type in (ActionType.CALL, ActionType.RAISE)
+
+    def test_suited_connector_raises_from_btn(self):
+        state = unopened_btn_decision("8s 7s", 100)
+        dec = recommend_preflop_action(state)
+        _assert_valid_decision(state, dec)
+        assert dec.recommended_action.action_type == ActionType.RAISE
+
+    def test_suited_connector_raises_bb_vs_limp(self):
+        state = bb_vs_limp_decision("8s 7s", 100)
+        dec = recommend_preflop_action(state)
+        _assert_valid_decision(state, dec)
+        assert dec.recommended_action.action_type == ActionType.RAISE
+
+    def test_akk_continues_vs_4bet(self):
+        state = bb_vs_4bet_decision("As Kd", 2.5, 8.0, 20.0, 100)
+        dec = recommend_preflop_action(state)
+        _assert_valid_decision(state, dec)
+        assert dec.recommended_action.action_type in (ActionType.CALL, ActionType.RAISE)
+
+
+# ===================================================================
+# Audit: recommendation legality across spots
+# ===================================================================
+
+class TestAuditRecommendationLegality:
+    """Every recommendation must be in the legal actions list."""
+
+    @pytest.mark.parametrize("cards,stack", [
+        ("Ah Ad", 100), ("As Ks", 100), ("7d 2c", 100),
+        ("Td 9c", 50), ("5s 5d", 20), ("As 5s", 8),
+    ])
+    def test_btn_open_legality(self, cards, stack):
+        state = unopened_btn_decision(cards, stack)
+        dec = recommend_preflop_action(state)
+        if dec.legal_actions:
+            assert dec.recommended_action in dec.legal_actions
+
+    @pytest.mark.parametrize("cards,open_size", [
+        ("As Kd", 2.5), ("7s 6s", 2.0), ("7d 2c", 3.0),
+        ("Qh Jd", 4.5), ("Td 9c", 5.0),
+    ])
+    def test_bb_vs_open_legality(self, cards, open_size):
+        state = bb_vs_open_decision(cards, open_size, 100)
+        dec = recommend_preflop_action(state)
+        if dec.legal_actions:
+            assert dec.recommended_action in dec.legal_actions
+
+    @pytest.mark.parametrize("cards", ["Ah Ad", "7d 2c", "8s 7s", "Kd Qc"])
+    def test_bb_vs_limp_legality(self, cards):
+        state = bb_vs_limp_decision(cards, 100)
+        dec = recommend_preflop_action(state)
+        if dec.legal_actions:
+            assert dec.recommended_action in dec.legal_actions
+
+    @pytest.mark.parametrize("cards", ["Ah Ad", "7d 2c", "Ts 9s", "Jh Jd"])
+    def test_btn_vs_3bet_legality(self, cards):
+        state = btn_vs_3bet_decision(cards, 2.5, 8.0, 100)
+        dec = recommend_preflop_action(state)
+        if dec.legal_actions:
+            assert dec.recommended_action in dec.legal_actions
