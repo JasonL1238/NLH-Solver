@@ -336,3 +336,14 @@ _CHARTS = {
     "BTN_VS_3BET": {"raise": BTN_VS_3BET_RAISE, "call": BTN_VS_3BET_CALL},
     "BB_VS_4BET": {"raise": BB_VS_4BET_RAISE, "call": BB_VS_4BET_CALL},
 }
+
+
+def get_chart_sets(context: str) -> tuple[frozenset[str], frozenset[str] | None]:
+    """Return (raise_set, call_set) for a chart context.
+
+    If context is unknown, returns (empty_set, None).
+    """
+    chart = _CHARTS.get(context)
+    if chart is None:
+        return frozenset(), None
+    return chart["raise"], chart.get("call")

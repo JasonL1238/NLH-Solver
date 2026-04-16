@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from .charts import get_chart_action
+from .charts import ALL_HANDS, get_chart_action, get_chart_sets, hand_strength
 from .classification import hand_features
 from .legal_actions import legal_actions_for_hero
 from .models import (
@@ -21,6 +21,18 @@ from .validation import validate_preflop_state
 # ---------------------------------------------------------------------------
 # Context mapping
 # ---------------------------------------------------------------------------
+
+_STANDARD_MDF = {
+    # Charts assume standard sizing per context.
+    # MDF = pot_before_raise / (pot_before_raise + raise_to_bb)
+    "BB_VS_OPEN": 1.5 / (1.5 + 2.5),      # 0.375
+    "BTN_VS_ISO": 2.0 / (2.0 + 3.5),      # ~0.364
+    "BTN_VS_3BET": 3.5 / (3.5 + 8.0),     # ~0.304
+    "BB_VS_4BET": 10.5 / (10.5 + 20.0),   # ~0.344
+}
+
+_PREMIUM_IMMUNE = frozenset({"AA", "KK", "QQ", "AKs"})
+
 
 def _determine_context(d: DerivedState, hero_pos: Position) -> str:
     """Map derived-state flags to the chart context key."""
@@ -123,6 +135,98 @@ def _pick_raise_size(
 
 
 # ---------------------------------------------------------------------------
+# MDF / price sensitivity helpers
+# ---------------------------------------------------------------------------
+
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
+
+def _last_aggressive_record(state: PokerState):
+    for rec in reversed(state.action_history):
+        if rec.action_type in (ActionType.RAISE, ActionType.BET):
+            return rec
+    return None
+
+
+def _compute_defense_scalar(
+    state: PokerState,
+    d: DerivedState,
+    chart_ctx: str,
+) -> tuple[float, float | None]:
+    """Return (defense_scalar, actual_mdf_or_None)."""
+    standard_mdf = _STANDARD_MDF.get(chart_ctx)
+    if standard_mdf is None:
+        return 1.0, None
+    if not (d.facing_open_raise or d.facing_3bet or d.facing_4bet):
+        return 1.0, None
+    if d.raise_size_in_bb is None or d.raise_size_in_bb <= 0:
+        return 1.0, None
+
+    last_aggr = _last_aggressive_record(state)
+    if last_aggr is None:
+        return 1.0, None
+
+    pot_before_raise = state.pot_size_bb - last_aggr.amount_added_bb
+    if pot_before_raise <= 0:
+        return 1.0, None
+
+    actual_mdf = pot_before_raise / (pot_before_raise + d.raise_size_in_bb)
+    defense_scalar = actual_mdf / standard_mdf
+    defense_scalar = _clamp(defense_scalar, 0.4, 1.5)
+    return defense_scalar, actual_mdf
+
+
+def _percentile_in_set(label: str, hand_set: frozenset[str]) -> float:
+    """Fraction of the set weaker than label (0.0=weakest, 1.0=strongest)."""
+    if not hand_set:
+        return 0.0
+    s = hand_strength(label)
+    below = sum(1 for h in hand_set if hand_strength(h) < s)
+    return below / len(hand_set)
+
+
+def _apply_mdf_filter(
+    *,
+    label: str,
+    chart_ctx: str,
+    chart_action: str,
+    defense_scalar: float,
+) -> tuple[str, str]:
+    """Return (new_action, rule_suffix) after MDF-based range scaling."""
+    if label in _PREMIUM_IMMUNE:
+        return chart_action, "MDF_PREMIUM_IMMUNE"
+
+    raise_set, call_set = get_chart_sets(chart_ctx)
+    if not raise_set and not call_set:
+        return chart_action, "MDF_NO_CONTEXT"
+
+    # Tighten when villain sizes up (scalar < 1.0)
+    if defense_scalar < 1.0 - 1e-9:
+        cutoff = 1.0 - defense_scalar  # fold bottom cutoff fraction
+        if chart_action == "CALL" and call_set is not None:
+            pct = _percentile_in_set(label, call_set)
+            if pct < cutoff:
+                return "FOLD", "MDF_TIGHTEN_FOLD_FROM_CALL"
+        if chart_action == "RAISE":
+            pct = _percentile_in_set(label, raise_set)
+            if pct < cutoff:
+                return "FOLD", "MDF_TIGHTEN_FOLD_FROM_RAISE"
+        return chart_action, "MDF_TIGHTEN_NO_CHANGE"
+
+    # Optional widening when villain sizes down (scalar > 1.1)
+    if defense_scalar > 1.1 and chart_action == "FOLD" and call_set is not None:
+        upgrade = min(defense_scalar - 1.0, 0.5)
+        fold_set = frozenset(ALL_HANDS - raise_set - call_set)
+        pct = _percentile_in_set(label, fold_set)
+        if pct >= 1.0 - upgrade:
+            return "CALL", "MDF_WIDEN_CALL_FROM_FOLD"
+        return chart_action, "MDF_WIDEN_NO_CHANGE"
+
+    return chart_action, "MDF_NEUTRAL"
+
+
+# ---------------------------------------------------------------------------
 # Decision builder
 # ---------------------------------------------------------------------------
 
@@ -134,6 +238,7 @@ def _build_decision(
     d: Optional[DerivedState],
     ctx: str,
     rule_id: str,
+    extra_debug: Optional[dict] = None,
 ) -> Decision:
     raise_bucket = None
     if action.action_type == ActionType.RAISE and action.raise_to_bb and d:
@@ -153,6 +258,8 @@ def _build_decision(
         "recommended_action": repr(action),
         "explanation": explanation,
     }
+    if extra_debug:
+        debug.update(extra_debug)
     return Decision(
         legal_actions=legal,
         recommended_action=action,
@@ -200,6 +307,24 @@ def recommend_preflop_action(state: PokerState) -> Decision:
         label, chart_ctx, d.stack_depth_bucket, facing_raise=facing_raise,
     )
 
+    defense_scalar, actual_mdf = _compute_defense_scalar(state, d, chart_ctx)
+    filtered_action, mdf_rule = _apply_mdf_filter(
+        label=label,
+        chart_ctx=chart_ctx,
+        chart_action=chart_action,
+        defense_scalar=defense_scalar,
+    )
+    extra_debug = {
+        "defense_scalar": round(defense_scalar, 4),
+        "actual_mdf": round(actual_mdf, 4) if actual_mdf is not None else None,
+        "standard_mdf": round(_STANDARD_MDF.get(chart_ctx, 0.0), 4) if chart_ctx in _STANDARD_MDF else None,
+        "mdf_rule": mdf_rule,
+        "chart_context": chart_ctx,
+        "chart_action_raw": chart_action,
+        "chart_action_filtered": filtered_action,
+    }
+    chart_action = filtered_action
+
     if chart_action == "RAISE":
         raise_opt = _pick_raise_size(legal, d, hf)
         if raise_opt:
@@ -208,7 +333,7 @@ def recommend_preflop_action(state: PokerState) -> Decision:
                 f"({d.stack_depth_bucket.value})."
             )
             return _build_decision(
-                legal, raise_opt, explanation, hf, d, ctx, "CHART_RAISE",
+                legal, raise_opt, explanation, hf, d, ctx, "CHART_RAISE", extra_debug,
             )
         call = _find_action(legal, ActionType.CALL)
         if call:
@@ -216,7 +341,7 @@ def recommend_preflop_action(state: PokerState) -> Decision:
                 f"Chart raise {label} but no raise available -- calling."
             )
             return _build_decision(
-                legal, call, explanation, hf, d, ctx, "CHART_RAISE_FALLBACK_CALL",
+                legal, call, explanation, hf, d, ctx, "CHART_RAISE_FALLBACK_CALL", extra_debug,
             )
 
     if chart_action == "CALL":
@@ -227,13 +352,13 @@ def recommend_preflop_action(state: PokerState) -> Decision:
                 f"({d.stack_depth_bucket.value})."
             )
             return _build_decision(
-                legal, call, explanation, hf, d, ctx, "CHART_CALL",
+                legal, call, explanation, hf, d, ctx, "CHART_CALL", extra_debug,
             )
         check = _find_action(legal, ActionType.CHECK)
         if check:
             explanation = f"Chart call {label} -- checking (no bet to call)."
             return _build_decision(
-                legal, check, explanation, hf, d, ctx, "CHART_CHECK",
+                legal, check, explanation, hf, d, ctx, "CHART_CHECK", extra_debug,
             )
 
     if chart_action == "CHECK":
@@ -241,7 +366,7 @@ def recommend_preflop_action(state: PokerState) -> Decision:
         if check:
             explanation = f"Chart check {label} in {chart_ctx}."
             return _build_decision(
-                legal, check, explanation, hf, d, ctx, "CHART_CHECK",
+                legal, check, explanation, hf, d, ctx, "CHART_CHECK", extra_debug,
             )
 
     # FOLD (or fallback)
@@ -253,15 +378,15 @@ def recommend_preflop_action(state: PokerState) -> Decision:
             f"({d.stack_depth_bucket.value})."
         )
         return _build_decision(
-            legal, fold, explanation, hf, d, ctx, "CHART_FOLD",
+            legal, fold, explanation, hf, d, ctx, "CHART_FOLD", extra_debug,
         )
     if check:
         explanation = f"Chart fold {label} -- checking (no fold option)."
         return _build_decision(
-            legal, check, explanation, hf, d, ctx, "CHART_CHECK_FREE",
+            legal, check, explanation, hf, d, ctx, "CHART_CHECK_FREE", extra_debug,
         )
 
     return _build_decision(
         legal, legal[0],
-        f"Fallback action with {label}.", hf, d, ctx, "FALLBACK",
+        f"Fallback action with {label}.", hf, d, ctx, "FALLBACK", extra_debug,
     )

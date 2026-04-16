@@ -474,6 +474,38 @@ class TestStackDepthSensitivity:
 
 
 # ===================================================================
+# MDF price sensitivity
+# ===================================================================
+
+class TestMdfPriceSensitivity:
+    def test_tightens_vs_large_open(self):
+        # Same hand, deep stack, different open sizes should tighten vs large opens
+        s2 = bb_vs_open_decision("7s 6s", 2.0, 100)
+        d2 = recommend_preflop_action(s2)
+        _assert_valid_decision(s2, d2)
+
+        s5 = bb_vs_open_decision("7s 6s", 5.0, 100)
+        d5 = recommend_preflop_action(s5)
+        _assert_valid_decision(s5, d5)
+
+        assert d2.recommended_action.action_type in (ActionType.CALL, ActionType.RAISE)
+        assert d5.recommended_action.action_type == ActionType.FOLD
+
+    def test_premiums_ignore_filter(self):
+        # Premiums should never be filtered out by MDF logic
+        s = bb_vs_open_decision("Ah Ad", 5.0, 100)
+        d = recommend_preflop_action(s)
+        _assert_valid_decision(s, d)
+        assert d.recommended_action.action_type == ActionType.RAISE
+
+    def test_debug_includes_scalar(self):
+        s = bb_vs_open_decision("7s 6s", 5.0, 100)
+        d = recommend_preflop_action(s)
+        assert "defense_scalar" in d.debug
+        assert "actual_mdf" in d.debug
+        assert "mdf_rule" in d.debug
+
+# ===================================================================
 # Action history ordering
 # ===================================================================
 

@@ -26,6 +26,8 @@ _BUILDERS = {
     "bb_vs_4bet":  lambda kw: bb_vs_4bet_decision(kw["hero_cards"], kw["open"], kw["threeb"], kw["fourb"], kw["stack"]),
 }
 
+_COL_W = 130
+
 
 def _action_str(action) -> str:
     if action.raise_to_bb is not None:
@@ -35,17 +37,36 @@ def _action_str(action) -> str:
     return action.action_type.value
 
 
+def _scalar_str(debug: dict) -> str:
+    s = debug.get("defense_scalar")
+    if s is not None and s != 1.0:
+        return f"S={s:.2f}"
+    return ""
+
+
 def run():
-    hdr = f"{'#':>3}  {'Scenario':<32} {'Hand':>5} {'Stack':>6} {'Bucket':<12} {'Context':<24} {'Action':<20} Rule ID"
-    sep = "-" * len(hdr)
+    hdr = (
+        f"{'#':>3}  {'Scenario':<34} {'Hand':>5} {'Stack':>6} "
+        f"{'Bucket':<12} {'Context':<24} {'Action':<20} {'MDF':>6}  Rule ID"
+    )
+    sep = "=" * _COL_W
+    thin = "-" * _COL_W
     print(sep)
     print(hdr)
     print(sep)
 
+    n_run = 0
     for i, (label, helper, kwargs) in enumerate(SCENARIOS, 1):
+        if label.startswith("##"):
+            title = label.lstrip("# ").strip()
+            print(thin)
+            print(f"  {title}")
+            print(thin)
+            continue
+
         builder = _BUILDERS.get(helper)
         if builder is None:
-            print(f"{i:>3}  {label:<32}  *** UNKNOWN HELPER: {helper} ***")
+            print(f"{i:>3}  {label:<34}  *** UNKNOWN HELPER: {helper} ***")
             continue
         try:
             state = builder(kwargs)
@@ -56,12 +77,17 @@ def run():
             hand = d.get("hand_class_label", "?")
             rule = d.get("baseline_rule_id", "?")
             act = _action_str(dec.recommended_action)
-            print(f"{i:>3}  {label:<32} {hand:>5} {state.effective_stack_bb:>5.0f}bb {bucket:<12} {ctx:<24} {act:<20} {rule}")
+            mdf = _scalar_str(d)
+            print(
+                f"{i:>3}  {label:<34} {hand:>5} {state.effective_stack_bb:>5.0f}bb "
+                f"{bucket:<12} {ctx:<24} {act:<20} {mdf:>6}  {rule}"
+            )
+            n_run += 1
         except Exception as e:
-            print(f"{i:>3}  {label:<32}  *** ERROR: {e} ***")
+            print(f"{i:>3}  {label:<34}  *** ERROR: {e} ***")
 
     print(sep)
-    print(f"  {len(SCENARIOS)} scenarios complete.")
+    print(f"  {n_run} scenarios evaluated.")
 
 
 if __name__ == "__main__":
