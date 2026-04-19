@@ -37,14 +37,24 @@ def validate_hand(
     # --- Config sanity ---
     if config.effective_stack_bb <= 0:
         raise ValidationError("Effective stack must be positive")
+    if config.hero_starting_bb <= 0 or config.villain_starting_bb <= 0:
+        raise ValidationError("Starting stacks must be positive")
     if config.small_blind_bb <= 0 or config.big_blind_bb <= 0:
         raise ValidationError("Blinds must be positive")
     if config.small_blind_bb > config.big_blind_bb:
         raise ValidationError("Small blind must not exceed big blind")
     if config.effective_stack_bb < config.big_blind_bb:
         raise ValidationError(
-            f"Effective stack {config.effective_stack_bb} must be at least "
+            f"Effective (min) stack {config.effective_stack_bb} must be at least "
             f"the big blind {config.big_blind_bb}")
+    if config.hero_starting_bb < config.big_blind_bb:
+        raise ValidationError(
+            f"Hero starting stack {config.hero_starting_bb} must be at least big blind "
+            f"{config.big_blind_bb}")
+    if config.villain_starting_bb < config.big_blind_bb:
+        raise ValidationError(
+            f"Villain starting stack {config.villain_starting_bb} must be at least big blind "
+            f"{config.big_blind_bb}")
 
     # --- Reconstruct (structural replay) ---
     try:
@@ -67,19 +77,21 @@ def validate_hand(
 # ---------------------------------------------------------------------------
 
 def _validate_contributions(state: HandState) -> None:
-    eff = state.config.effective_stack_bb
+    cfg = state.config
+    h_cap = cfg.hero_starting_bb
+    v_cap = cfg.villain_starting_bb
     if state.hero_contribution_bb < -1e-9:
         raise ValidationError("Hero contribution is negative")
     if state.villain_contribution_bb < -1e-9:
         raise ValidationError("Villain contribution is negative")
-    if state.hero_contribution_bb > eff + 1e-9:
+    if state.hero_contribution_bb > h_cap + 1e-9:
         raise ValidationError(
             f"Hero contribution {state.hero_contribution_bb} exceeds "
-            f"effective stack {eff}")
-    if state.villain_contribution_bb > eff + 1e-9:
+            f"hero starting stack {h_cap}")
+    if state.villain_contribution_bb > v_cap + 1e-9:
         raise ValidationError(
             f"Villain contribution {state.villain_contribution_bb} exceeds "
-            f"effective stack {eff}")
+            f"villain starting stack {v_cap}")
 
 
 def _validate_board_count(state: HandState) -> None:

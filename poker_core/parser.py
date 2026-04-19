@@ -61,15 +61,28 @@ def make_hand_config(
     small_blind_bb: float = 0.5,
     big_blind_bb: float = 1.0,
     villain_cards: Optional[str] = None,
+    *,
+    hero_starting_bb: Optional[float] = None,
+    villain_starting_bb: Optional[float] = None,
 ) -> HandConfig:
-    """Build a ``HandConfig`` from human-readable strings."""
+    """Build a ``HandConfig`` from human-readable strings.
+
+    If ``hero_starting_bb`` / ``villain_starting_bb`` are omitted, both start at
+    ``effective_stack_bb`` (symmetric). Otherwise each side uses its own start;
+    ``effective_stack_bb`` on the config is set to ``min(hero, villain)`` for depth.
+    """
     hc = parse_cards(hero_cards)
     pos = Position(hero_position)
     vc = parse_cards(villain_cards) if villain_cards else None
+    hs = float(effective_stack_bb) if hero_starting_bb is None else float(hero_starting_bb)
+    vs = float(effective_stack_bb) if villain_starting_bb is None else float(villain_starting_bb)
+    eff_depth = min(hs, vs)
     return HandConfig(
         hero_position=pos,
         hero_hole_cards=hc,
-        effective_stack_bb=effective_stack_bb,
+        effective_stack_bb=eff_depth,
+        hero_starting_bb=hs,
+        villain_starting_bb=vs,
         small_blind_bb=small_blind_bb,
         big_blind_bb=big_blind_bb,
         villain_hole_cards=vc,

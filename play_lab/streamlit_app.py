@@ -7,9 +7,11 @@ Run from repository root::
 
 from __future__ import annotations
 
+import json
 import os
 import sys
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Dict, List, Literal, Optional
 
 # Streamlit sets sys.path[0] to this script's directory; ensure repo root is importable.
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -62,15 +64,55 @@ from play_lab.engine_apply import (
     preflop_option_to_poker_apply,
 )
 from play_lab.preflop_bridge import PreflopBridgeError, poker_actions_to_preflop_raw
+from play_lab.stack_carry import is_busted_for_next_hand, stacks_after_completed_hand
 from play_lab.ui_helpers import (
     board_cards_colored_html,
     format_engine_villain_banner_html,
+    hero_villain_stacks_from_last_settings,
     hole_cards_colored_html,
     last_hand_settings_complete,
 )
 
 # Written by handlers; consumed at start of _init_session before widgets bind the key.
 _PENDING_NEXT_STACK_BB = "_play_lab_pending_next_stack_bb"
+
+# New-hand stack inputs must NOT use the same session_state keys as canonical stacks:
+# handlers update canonical stacks after widgets render (same run), which Streamlit forbids.
+_NH_ENGINE_STACK_WIDGET_KEY = "play_lab_nh_engine_stack_bb"
+_NH_VILLAIN_STACK_WIDGET_KEY = "play_lab_nh_villain_stack_bb"
+# Bust carry can store true stacks below 1 bb; inputs still require min 1 bb to post (see bust notice).
+_NH_STACK_INPUT_MIN_BB = 1.0
+
+
+def _clear_nh_stack_widget_keys() -> None:
+    """Drop new-hand stack widget state so ``number_input`` picks up ``value=`` from canonical stacks."""
+    st.session_state.pop(_NH_ENGINE_STACK_WIDGET_KEY, None)
+    st.session_state.pop(_NH_VILLAIN_STACK_WIDGET_KEY, None)
+
+
+def _agent_debug_log(*, hypothesis_id: str, location: str, message: str, data: Dict[str, Any]) -> None:
+    """Append one NDJSON line when ``NLH_PLAY_LAB_AGENT_DEBUG_PATH`` is set; no-op otherwise."""
+    path = (os.environ.get("NLH_PLAY_LAB_AGENT_DEBUG_PATH") or "").strip()
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as _f:
+            _f.write(
+                json.dumps(
+                    {
+                        "sessionId": "93d118",
+                        "hypothesisId": hypothesis_id,
+                        "location": location,
+                        "message": message,
+                        "data": data,
+                        "timestamp": int(time.time() * 1000),
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
 
 
 def _request_next_stack_bb(value: float) -> None:
@@ -104,6 +146,16 @@ def _init_session() -> None:
         st.session_state.play_lab_hide_hero_holes = False
     if "play_lab_show_engine_logic" not in st.session_state:
         st.session_state.play_lab_show_engine_logic = False
+    if "play_lab_session_hero_bb" not in st.session_state:
+        st.session_state.play_lab_session_hero_bb = float(
+            st.session_state.play_lab_scenario.effective_stack_bb
+        )
+    if "play_lab_session_villain_bb" not in st.session_state:
+        st.session_state.play_lab_session_villain_bb = float(
+            st.session_state.play_lab_scenario.effective_stack_bb
+        )
+    if "play_lab_bust_notice" not in st.session_state:
+        st.session_state.play_lab_bust_notice = None
 
 
 def _scenario() -> ScenarioState:
@@ -127,16 +179,50 @@ def _clear_hand() -> None:
             del st.session_state[k]
 
 
+def _carry_stacks_after_hand_if_over(cfg: HandConfig, hist: List[Action]) -> Literal["skip", "ok", "bust"]:
+    """If ``hist`` is a completed hand, update session + last-hand stacks (or bust notice)."""
+    try:
+        st_final = validate_hand(cfg, hist)
+    except PokerValidationError:
+        return "skip"
+    if not st_final.hand_over:
+        return "skip"
+    nh, nv = stacks_after_completed_hand(cfg, st_final)
+    bb = float(cfg.big_blind_bb)
+    if is_busted_for_next_hand(nh, nv, big_blind_bb=bb):
+        st.session_state.play_lab_bust_notice = (
+            f"**Bust / short stack:** engine **{nh:.2f} bb**, you **{nv:.2f} bb** "
+            f"(need at least **{bb:g} bb** each to post). "
+            "Adjust **starting stacks** below and press **Post blinds & start** to rebuy."
+        )
+        st.session_state.play_lab_session_hero_bb = max(nh, 0.0)
+        st.session_state.play_lab_session_villain_bb = max(nv, 0.0)
+        _clear_nh_stack_widget_keys()
+        return "bust"
+    st.session_state.play_lab_session_hero_bb = nh
+    st.session_state.play_lab_session_villain_bb = nv
+    _clear_nh_stack_widget_keys()
+    last_up = st.session_state.get("play_lab_last_hand_settings")
+    if isinstance(last_up, dict):
+        last_copy = dict(last_up)
+        last_copy["hero_stack_bb"] = nh
+        last_copy["villain_stack_bb"] = nv
+        last_copy["stack"] = min(nh, nv)
+        st.session_state.play_lab_last_hand_settings = last_copy
+    return "ok"
+
+
 def _post_blinds_and_persist(
     sc: ScenarioState,
     *,
     pos: str,
-    stack: float,
+    hero_stack_bb: float,
+    villain_stack_bb: float,
     randomize: bool,
     hero_txt: str,
     vil_txt: str,
 ) -> None:
-    """Build config, post blinds, persist last-hand settings and effective stack."""
+    """Build config, post blinds, persist last-hand settings and per-player stacks."""
     rng = sc.rng
     if randomize:
         hero_h, vil_h = deal_random_hands(rng)
@@ -145,26 +231,52 @@ def _post_blinds_and_persist(
     else:
         h_str = hero_txt.strip()
         v_str = vil_txt.strip()
+    hs = float(hero_stack_bb)
+    vs = float(villain_stack_bb)
+    # #region agent log
+    _agent_debug_log(
+        hypothesis_id="H1",
+        location="streamlit_app.py:_post_blinds_and_persist",
+        message="persist_before_canonical_stack_assign",
+        data={"hero_stack_bb": hs, "villain_stack_bb": vs},
+    )
+    # #endregion
+    eff_depth = min(hs, vs)
     cfg = make_hand_config(
         h_str,
         hero_position=pos,
-        effective_stack_bb=float(stack),
+        effective_stack_bb=eff_depth,
         villain_cards=v_str,
+        hero_starting_bb=hs,
+        villain_starting_bb=vs,
     )
     hist, _state = post_blinds(cfg)
     st.session_state.play_lab_hand_cfg = cfg
     st.session_state.play_lab_hand_hist = hist
-    st.session_state.play_lab_scenario.effective_stack_bb = float(stack)
+    st.session_state.play_lab_session_hero_bb = hs
+    st.session_state.play_lab_session_villain_bb = vs
+    # #region agent log
+    _agent_debug_log(
+        hypothesis_id="H1",
+        location="streamlit_app.py:_post_blinds_and_persist",
+        message="canonical_stacks_written_ok",
+        data={"play_lab_session_hero_bb": hs, "play_lab_session_villain_bb": vs},
+    )
+    # #endregion
+    st.session_state.play_lab_scenario.effective_stack_bb = eff_depth
+    st.session_state.play_lab_bust_notice = None
     settings: Dict[str, Any] = {
         "hero_position": pos,
-        "stack": float(stack),
+        "stack": eff_depth,
+        "hero_stack_bb": hs,
+        "villain_stack_bb": vs,
         "randomize": randomize,
     }
     if not randomize:
         settings["hero_txt"] = h_str
         settings["vil_txt"] = v_str
     st.session_state.play_lab_last_hand_settings = settings
-    _request_next_stack_bb(float(stack))
+    _request_next_stack_bb(eff_depth)
     st.rerun()
 
 
@@ -175,17 +287,25 @@ def _finalize_and_start_next(
     reason: str,
 ) -> None:
     """End this hand, then immediately deal the next in the same session (``reason`` is for logs only)."""
-    _ = reason
     sc = _scenario()
     HandCoordinator.note_hand_completed(sc)
+
+    if reason == "hand_over":
+        outcome = _carry_stacks_after_hand_if_over(cfg, hist)
+        if outcome == "bust":
+            _clear_hand()
+            st.rerun()
+            return
+
     _clear_hand()
     last = st.session_state.get("play_lab_last_hand_settings")
-    stack = float(st.session_state.play_lab_next_stack_bb)
     if last_hand_settings_complete(last) and last is not None:
+        h_s, v_s = hero_villain_stacks_from_last_settings(last)
         _post_blinds_and_persist(
             sc,
             pos=str(last["hero_position"]),
-            stack=stack,
+            hero_stack_bb=h_s,
+            villain_stack_bb=v_s,
             randomize=bool(last["randomize"]),
             hero_txt=str(last.get("hero_txt", "")),
             vil_txt=str(last.get("vil_txt", "")),
@@ -206,10 +326,12 @@ def _render_idle_panel() -> None:
     last: Optional[Dict[str, Any]] = st.session_state.get("play_lab_last_hand_settings")
     if last_hand_settings_complete(last) and last is not None:
         if st.button("Start next hand (same settings as last hand)", key="play_lab_next_same"):
+            h_s, v_s = hero_villain_stacks_from_last_settings(last)
             _post_blinds_and_persist(
                 sc,
                 pos=str(last["hero_position"]),
-                stack=float(st.session_state.play_lab_next_stack_bb),
+                hero_stack_bb=h_s,
+                villain_stack_bb=v_s,
                 randomize=bool(last["randomize"]),
                 hero_txt=str(last.get("hero_txt", "")),
                 vil_txt=str(last.get("vil_txt", "")),
@@ -232,13 +354,9 @@ def _render_scenario_sidebar() -> None:
         key="play_lab_show_engine_logic",
         help="Step-by-step trace; expand each metric for what it means.",
     )
-    st.sidebar.number_input(
-        "Next hand stack (bb)",
-        min_value=1.0,
-        value=float(st.session_state.play_lab_next_stack_bb),
-        step=1.0,
-        key="play_lab_next_stack_bb",
-        help="Applied when you start the next hand (one-click or form).",
+    st.sidebar.caption(
+        "Next-hand **starting stacks** are taken from the main form "
+        "(engine / yours) or carried after a completed hand."
     )
     with st.sidebar.form("new_session"):
         lab = st.text_input("Session label", value="lab")
@@ -252,6 +370,10 @@ def _render_scenario_sidebar() -> None:
             )
             _clear_hand()
             _request_next_stack_bb(float(stack))
+            st.session_state.play_lab_session_hero_bb = float(stack)
+            st.session_state.play_lab_session_villain_bb = float(stack)
+            _clear_nh_stack_widget_keys()
+            st.session_state.play_lab_bust_notice = None
             st.session_state.pop("play_lab_last_hand_settings", None)
             st.rerun()
 
@@ -265,7 +387,6 @@ def _render_new_hand() -> None:
     defaults: Dict[str, Any] = st.session_state.get("play_lab_last_hand_settings") or {}
     pos_default = str(defaults.get("hero_position", "BTN_SB"))
     pos_idx = 0 if pos_default == "BTN_SB" else 1
-    stack_default = float(defaults.get("stack", sc.effective_stack_bb))
     rand_default = bool(defaults.get("randomize", True))
     hero_default = str(defaults.get("hero_txt", "As Kd"))
     vil_default = str(defaults.get("vil_txt", "Qc Jd"))
@@ -281,7 +402,41 @@ def _render_new_hand() -> None:
     col1, col2 = st.columns(2)
     with col1:
         pos = st.selectbox("Engine (HERO) position", ["BTN_SB", "BB"], index=pos_idx)
-        stack = st.number_input("Stack (bb)", value=stack_default, min_value=1.0)
+        st.caption("Starting stacks for **this** hand (carry forward after each completed hand).")
+        can_h = float(st.session_state.play_lab_session_hero_bb)
+        can_v = float(st.session_state.play_lab_session_villain_bb)
+        show_h = max(_NH_STACK_INPUT_MIN_BB, can_h)
+        show_v = max(_NH_STACK_INPUT_MIN_BB, can_v)
+        hero_stack = st.number_input(
+            "Engine starting stack (bb)",
+            min_value=_NH_STACK_INPUT_MIN_BB,
+            value=show_h,
+            step=1.0,
+            key=_NH_ENGINE_STACK_WIDGET_KEY,
+        )
+        vil_stack = st.number_input(
+            "Your starting stack (bb)",
+            min_value=_NH_STACK_INPUT_MIN_BB,
+            value=show_v,
+            step=1.0,
+            key=_NH_VILLAIN_STACK_WIDGET_KEY,
+        )
+        # #region agent log
+        _agent_debug_log(
+            hypothesis_id="H2",
+            location="streamlit_app.py:_render_new_hand",
+            message="nh_stack_widgets_bound",
+            data={
+                "widget_engine": _NH_ENGINE_STACK_WIDGET_KEY,
+                "widget_villain": _NH_VILLAIN_STACK_WIDGET_KEY,
+                "canonical_hero_bb": can_h,
+                "canonical_villain_bb": can_v,
+                "display_hero_bb": show_h,
+                "display_villain_bb": show_v,
+                "clamped": bool(can_h < _NH_STACK_INPUT_MIN_BB or can_v < _NH_STACK_INPUT_MIN_BB),
+            },
+        )
+        # #endregion
         randomize = st.checkbox("Random hero + villain hole cards", value=rand_default)
     with col2:
         hero_txt = st.text_input("Engine hole cards", value=hero_default, disabled=randomize)
@@ -292,7 +447,8 @@ def _render_new_hand() -> None:
         _post_blinds_and_persist(
             sc,
             pos=pos,
-            stack=float(stack),
+            hero_stack_bb=float(hero_stack),
+            villain_stack_bb=float(vil_stack),
             randomize=randomize,
             hero_txt=hero_txt,
             vil_txt=vil_txt,
@@ -513,8 +669,39 @@ def _render_hero_engine(cfg: HandConfig, hist: List[Action], state: HandState) -
                     state, samples=samples, seed=seed,
                 )
         fdec = st.session_state[cache_key]
+        dbg_fl = dict(fdec.debug or {})
         st.write("**Engine (equity-aware):**", repr(fdec.recommended_action))
         st.caption(fdec.explanation)
+        with st.expander("Villain range on this flop (how it was built)", expanded=False):
+            from flop_equity.range_model import build_villain_flop_range, villain_flop_range_debug_lines
+
+            st.caption(
+                "Explicit **label → combo** model used for Monte Carlo vs villain "
+                "(not a full solver range)."
+            )
+            for line in villain_flop_range_debug_lines(state):
+                st.markdown(f"- {line}")
+            _combos, vsum = build_villain_flop_range(state)
+            st.markdown(f"**Summary:** {vsum}")
+            top_rows = sorted(_combos, key=lambda t: -t[1])[:18]
+            if top_rows:
+                st.caption("Top weighted alive combos (subset):")
+                st.table(
+                    [
+                        {"combo": hole_cards_spaced(hc), "weight": round(w, 4)}
+                        for hc, w in top_rows
+                    ]
+                )
+        with st.expander("Decision flow (steps + diagram)", expanded=False):
+            from play_lab.flop_flow_viz import flop_decision_flow_bullets, flop_decision_flow_mermaid
+
+            for line in flop_decision_flow_bullets(dbg_fl):
+                st.markdown(line)
+            st.markdown(
+                "```mermaid\n"
+                + flop_decision_flow_mermaid(dbg_fl)
+                + "\n```"
+            )
         if show_logic:
             _render_trace_steps(flop_trace_steps(state, fdec))
             with st.expander("Flop raw debug (JSON)"):
@@ -557,8 +744,27 @@ def _render_hero_engine(cfg: HandConfig, hist: List[Action], state: HandState) -
                         state, samples=samples, seed=seed,
                     )
         ev_dec = st.session_state[cache_key]
+        dbg_ev = dict(ev_dec.debug or {})
         st.write("**Engine (EV):**", repr(ev_dec.recommended_action))
         st.caption(ev_dec.explanation)
+        with st.expander(f"Villain range ({st_label}; same v1 carry-forward as flop)", expanded=False):
+            from flop_equity.range_model import build_villain_flop_range, villain_flop_range_debug_lines
+
+            for line in villain_flop_range_debug_lines(state):
+                st.markdown(f"- {line}")
+            _, vsum = build_villain_flop_range(state)
+            st.markdown(f"**Summary:** {vsum}")
+            st.caption(str(dbg_ev.get("range_note", "")))
+        with st.expander(f"Decision flow ({st_label})", expanded=False):
+            from play_lab.flop_flow_viz import flop_decision_flow_bullets, flop_decision_flow_mermaid
+
+            for line in flop_decision_flow_bullets(dbg_ev):
+                st.markdown(line)
+            st.markdown(
+                "```mermaid\n"
+                + flop_decision_flow_mermaid(dbg_ev)
+                + "\n```"
+            )
         if show_logic:
             _render_trace_steps(postflop_ev_trace_steps(state, ev_dec, street_label=st_label))
             with st.expander(f"{st_label} raw debug (JSON)"):
@@ -574,9 +780,14 @@ def _render_hero_engine(cfg: HandConfig, hist: List[Action], state: HandState) -
 
 
 def _end_hand(cfg: HandConfig, hist: List[Action], reason: str) -> None:
-    _ = cfg, hist, reason
     sc = _scenario()
     HandCoordinator.note_hand_completed(sc)
+    if reason == "hand_over":
+        outcome = _carry_stacks_after_hand_if_over(cfg, hist)
+        if outcome == "bust":
+            _clear_hand()
+            st.rerun()
+            return
     st.success("Hand ended. Start the next hand below (same session), or **New session** in the sidebar.")
     _clear_hand()
     st.rerun()
@@ -586,6 +797,9 @@ def main() -> None:
     st.set_page_config(page_title="NLH Play Lab", layout="wide")
     _init_session()
     st.title("Play lab — you are VILLAIN vs engine (HERO)")
+    bust = st.session_state.get("play_lab_bust_notice")
+    if bust:
+        st.markdown(bust)
     st.caption(
         "Canonical state: **poker_core**. Engine: **baseline_preflop** + **flop_equity** (flop) + "
         "**postflop_policy** EV (turn/river). All-in runout deals turn/river automatically. "
@@ -620,8 +834,10 @@ def main() -> None:
     state = _rebuild_state(cfg, hist)
 
     eff = float(cfg.effective_stack_bb)
-    hero_rem = max(0.0, eff - float(state.hero_contribution_bb))
-    vil_rem = max(0.0, eff - float(state.villain_contribution_bb))
+    h0 = float(cfg.hero_starting_bb)
+    v0 = float(cfg.villain_starting_bb)
+    hero_rem = max(0.0, h0 - float(state.hero_contribution_bb))
+    vil_rem = max(0.0, v0 - float(state.villain_contribution_bb))
 
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
@@ -632,7 +848,7 @@ def main() -> None:
         st.metric("To call (bb)", f"{state.current_bet_to_call_bb:.2f}")
     with c3:
         st.metric("Effective stack (bb)", f"{eff:.1f}")
-        st.caption("Symmetric HU cap used by the engine (both start here).")
+        st.caption("Preflop depth cap: min(engine start, your start).")
     with c4:
         st.metric("Engine stack left (bb)", f"{hero_rem:.2f}")
         st.caption(f"In pot: {state.hero_contribution_bb:.2f} bb")

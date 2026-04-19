@@ -119,7 +119,8 @@ def reconstruct_hand_state(
     betting_closed = False
     blinds_posted = 0
 
-    eff = config.effective_stack_bb
+    def _stack_cap(player: Player) -> float:
+        return config.stack_cap_bb(player)
 
     for idx, action in enumerate(action_history):
         at = action.action_type
@@ -215,7 +216,7 @@ def reconstruct_hand_state(
                 current_actor = _first_actor_for_street(Street.PREFLOP, config)
                 betting_closed = False
 
-            if abs(total_contrib[player] - eff) < 1e-9:
+            if abs(total_contrib[player] - _stack_cap(player)) < 1e-9:
                 if player == Player.HERO:
                     hero_all_in = True
                 else:
@@ -251,7 +252,7 @@ def reconstruct_hand_state(
 
         opp = _opponent(player)
         to_call = max(0.0, street_bet_level - street_contrib[player])
-        player_remaining = eff - total_contrib[player]
+        player_remaining = _stack_cap(player) - total_contrib[player]
 
         if at == ActionType.FOLD:
             if to_call < 1e-9:
@@ -291,7 +292,7 @@ def reconstruct_hand_state(
             total_contrib[player] += actual_call
             street_contrib[player] += actual_call
 
-            if abs(total_contrib[player] - eff) < 1e-9:
+            if abs(total_contrib[player] - _stack_cap(player)) < 1e-9:
                 if player == Player.HERO:
                     hero_all_in = True
                 else:
@@ -336,7 +337,7 @@ def reconstruct_hand_state(
             last_aggressor = player
             street_acted[player] = True
 
-            if abs(total_contrib[player] - eff) < 1e-9:
+            if abs(total_contrib[player] - _stack_cap(player)) < 1e-9:
                 if player == Player.HERO:
                     hero_all_in = True
                 else:
@@ -370,7 +371,7 @@ def reconstruct_hand_state(
                     f"(index {idx})")
 
             min_legal_raise_to = street_bet_level + last_full_raise_size
-            is_all_in_raise = abs(total_contrib[player] + added - eff) < 1e-9
+            is_all_in_raise = abs(total_contrib[player] + added - _stack_cap(player)) < 1e-9
 
             if raise_to < street_bet_level + 1e-9 and not is_all_in_raise:
                 raise ReconstructionError(
@@ -394,7 +395,7 @@ def reconstruct_hand_state(
             last_aggressor = player
             street_acted[player] = True
 
-            if abs(total_contrib[player] - eff) < 1e-9:
+            if abs(total_contrib[player] - _stack_cap(player)) < 1e-9:
                 if player == Player.HERO:
                     hero_all_in = True
                 else:

@@ -47,8 +47,8 @@ def legal_actions(state: HandState) -> List[LegalAction]:
         actor_contrib_total = state.villain_contribution_bb
         actor_street_contrib = state.street_contrib_villain
 
-    eff = state.config.effective_stack_bb
-    remaining = eff - actor_contrib_total
+    cap = state.config.stack_cap_bb(actor)
+    remaining = cap - actor_contrib_total
     to_call = state.current_bet_to_call_bb
     bb = state.config.big_blind_bb
 

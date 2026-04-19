@@ -134,9 +134,16 @@ class HandConfig:
     hero_position: Position
     hero_hole_cards: HoleCards
     effective_stack_bb: float
+    """Minimum starting stack (bb); used for HU depth / preflop charts."""
+    hero_starting_bb: float
+    villain_starting_bb: float
     small_blind_bb: float = 0.5
     big_blind_bb: float = 1.0
     villain_hole_cards: Optional[HoleCards] = None
+
+    def stack_cap_bb(self, player: Player) -> float:
+        """Maximum total contribution this player can make this hand (starting stack)."""
+        return self.hero_starting_bb if player == Player.HERO else self.villain_starting_bb
 
     @property
     def villain_position(self) -> Position:

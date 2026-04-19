@@ -414,6 +414,51 @@ def build_villain_flop_range(
     return expanded, summary
 
 
+def villain_flop_range_debug_lines(state: HandState) -> List[str]:
+    """Human-readable steps for how :func:`build_villain_flop_range` narrows weights.
+
+    Intended for UI / traces (not a second source of truth — mirrors the builder).
+    """
+    try:
+        line, villain = _detect_preflop_line(state)
+        villain_pos = state.config.position_for_player(Player.VILLAIN)
+        label_weights, summary = _range_for_line(line, villain, villain_pos)
+        flop_action = _detect_villain_flop_action(state)
+        refined = _refine_for_flop_action(dict(label_weights), flop_action)
+        dead = _dead_cards(state)
+        expanded = _expand_and_filter(refined, dead)
+        tw = sum(w for _hc, w in expanded)
+        n_labels = sum(1 for w in refined.values() if w > 1e-9)
+        lines = [
+            f"Detected **preflop line**: `{line}` (labels are for **VILLAIN** holding).",
+            f"**Starting prior:** {summary} — **{n_labels}** non-empty hand-class buckets.",
+        ]
+        if flop_action == "bet":
+            lines.append(
+                "**Flop signal:** villain **bet** → downweight air labels (×0.4) before expansion."
+            )
+        elif flop_action == "check":
+            lines.append(
+                "**Flop signal:** villain **check** → downweight premium pairs (×0.5) before expansion."
+            )
+        else:
+            lines.append(
+                "**Flop signal:** no separate villain bet/check line yet "
+                "(e.g. first to act on flop or only blind money so far)."
+            )
+        lines.append(
+            f"**Blockers:** remove hero hole cards + **{len(state.board_cards)}** board cards, "
+            f"then expand labels to **{len(expanded)}** alive weighted combos."
+        )
+        lines.append(f"**Alive weight sum** (relative, not normalized to 1): **{tw:.3f}**.")
+        return lines
+    except (AttributeError, TypeError):
+        return [
+            "_Villain range narrowing needs a full engine `HandState` "
+            "(`action_history`, `config`, board)._"
+        ]
+
+
 def _dead_cards(state: HandState) -> frozenset:
     hero = state.config.hero_hole_cards
     return frozenset({hero.high, hero.low} | set(state.board_cards))

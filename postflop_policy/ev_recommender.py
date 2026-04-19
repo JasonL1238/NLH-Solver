@@ -17,7 +17,6 @@ from flop_spot.context import derive_flop_context
 from flop_spot.models import FlopActionChoice, FlopDecision
 from flop_spot.spot_debug import build_spot_debug
 
-from postflop_equity.range_carryforward import RANGE_NOTE_V1, build_villain_postflop_range
 from postflop_range.range_tracker import VillainParticleTracker
 
 from .ev_core import (
@@ -69,15 +68,23 @@ def recommend_postflop_action_ev(
 
     # v1: neutral response priors on turn/river (flop profile not applied here).
     profile_effective: Any = None
+    range_note_for_debug: str
 
     if villain_range_override is not None:
         v_range = villain_range_override
         range_summary = "User-provided override range"
+        range_note_for_debug = "User-provided override range"
     elif particle_tracker is not None:
         v_range = particle_tracker.export_weighted_range_for_rollouts()
         range_summary = "postflop_range.VillainParticleTracker (particle export)"
+        range_note_for_debug = "Particle-based range (see particle_range_debug)"
     else:
+        # Local import: avoids ``postflop_equity`` package init pulling ``integration``
+        # while this module is still loading (circular import with ``integration``).
+        from postflop_equity.range_carryforward import RANGE_NOTE_V1, build_villain_postflop_range
+
         v_range, range_summary = build_villain_postflop_range(state)
+        range_note_for_debug = RANGE_NOTE_V1
 
     hero = state.config.hero_hole_cards
     board = list(state.board_cards)
@@ -161,11 +168,7 @@ def recommend_postflop_action_ev(
         "samples_used": mc["samples_used"],
         "monte_carlo_samples": mc["samples_used"],
         "villain_range_summary": range_summary,
-        "range_note": (
-            RANGE_NOTE_V1
-            if particle_tracker is None
-            else "Particle-based range (see particle_range_debug)"
-        ),
+        "range_note": range_note_for_debug,
         "pot_odds_threshold": pot_odds_threshold,
         "street_policy_version": cfg.street_policy_version,
         "ev_policy": "postflop_policy.ev_recommender",

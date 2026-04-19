@@ -11,12 +11,6 @@ from flop_spot.models import FlopDecision
 
 from postflop_range.range_tracker import VillainParticleTracker
 
-from postflop_policy.ev_recommender import (
-    recommend_postflop_action_ev,
-    recommend_river_action_ev,
-    recommend_turn_action_ev,
-)
-
 _EQUITY_MARGIN = 0.05
 
 
@@ -30,6 +24,10 @@ def recommend_turn_action_with_equity(
     profile: Any = None,
 ) -> FlopDecision:
     """EV-first turn recommendation (Monte Carlo river runouts)."""
+    # Local import breaks ``postflop_equity`` package init → ``integration`` → ``ev_recommender``
+    # cycle while ``ev_recommender`` is still loading ``postflop_equity.range_carryforward``.
+    from postflop_policy.ev_recommender import recommend_turn_action_ev
+
     dec = recommend_turn_action_ev(
         state,
         profile=profile,
@@ -52,6 +50,8 @@ def recommend_river_action_with_equity(
     profile: Any = None,
 ) -> FlopDecision:
     """EV-first river recommendation (exact equity vs range; ``samples`` unused)."""
+    from postflop_policy.ev_recommender import recommend_river_action_ev
+
     dec = recommend_river_action_ev(
         state,
         profile=profile,
@@ -76,6 +76,8 @@ def recommend_postflop_action_with_equity(
     profile: Any = None,
 ) -> FlopDecision:
     """Dispatch by ``street`` (FLOP/TURN/RIVER) with parity debug keys."""
+    from postflop_policy.ev_recommender import recommend_postflop_action_ev
+
     dec = recommend_postflop_action_ev(
         state,
         profile=profile,

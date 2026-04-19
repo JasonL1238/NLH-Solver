@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
 from baseline_preflop.models import Decision, DerivedState, PokerState
+from flop_equity.range_model import villain_flop_range_debug_lines
 from poker_core.models import HandState
 
 
@@ -202,6 +203,7 @@ def flop_trace_steps(state: HandState, flop_dec: Any) -> List[TraceStep]:
         )
         snap_metrics.append(TraceMetric("Pot odds (call)", _fmt(thr), "pot_odds_threshold"))
 
+    range_intro = "\n\n".join(villain_flop_range_debug_lines(state))
     steps: List[TraceStep] = [
         TraceStep(title="Table snapshot", intro_md=intro_snap, metrics=snap_metrics),
         TraceStep(
@@ -213,6 +215,17 @@ def flop_trace_steps(state: HandState, flop_dec: Any) -> List[TraceStep]:
                 TraceMetric("SPR bucket", _fmt(dbg.get("spr_bucket")), "spr_bucket"),
                 TraceMetric("SPR (numeric)", _fmt(dbg.get("spr")), "spr"),
                 TraceMetric("Facing bet size bucket", _fmt(dbg.get("flop_bet_size_bucket")), "flop_bet_size_bucket"),
+            ],
+        ),
+        TraceStep(
+            title="Villain range — how it was narrowed",
+            intro_md=range_intro,
+            metrics=[
+                TraceMetric(
+                    "Same line as MC summary",
+                    _fmt(dbg.get("villain_range_summary")),
+                    "villain_range_summary",
+                ),
             ],
         ),
         TraceStep(

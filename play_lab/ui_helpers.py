@@ -71,3 +71,11 @@ def last_hand_settings_complete(settings: Optional[dict]) -> bool:
     if settings.get("randomize"):
         return True
     return "hero_txt" in settings and "vil_txt" in settings
+
+
+def hero_villain_stacks_from_last_settings(settings: dict) -> tuple[float, float]:
+    """Return ``(hero_start_bb, villain_start_bb)`` from saved last-hand dict."""
+    base = float(settings["stack"])
+    h = float(settings.get("hero_stack_bb", base))
+    v = float(settings.get("villain_stack_bb", base))
+    return h, v
